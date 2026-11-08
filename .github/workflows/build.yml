@@ -1,0 +1,529 @@
+name: Build APK
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate Android project
+        run: |
+          set -e
+          mkdir -p proj && cd proj
+          mkdir -p app
+          cat > app/build.gradle <<'FBEOF'
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'com.friendsbook.app'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.friendsbook.admin"
+                  minSdk 21
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+              buildTypes { release { minifyEnabled false } }
+              compileOptions { sourceCompatibility JavaVersion.VERSION_1_8; targetCompatibility JavaVersion.VERSION_1_8 }
+          }
+          dependencies {
+              implementation 'androidx.webkit:webkit:1.8.0'
+          }
+          FBEOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'FBEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+              <uses-permission android:name="android.permission.CAMERA"/>
+              <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+              <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
+              <uses-permission android:name="android.permission.VIBRATE"/>
+              <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
+              <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
+              <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
+              <uses-feature android:name="android.hardware.camera" android:required="false"/>
+              <uses-feature android:name="android.hardware.microphone" android:required="false"/>
+              <application android:label="@string/app_name" android:icon="@drawable/ic_launcher" android:theme="@style/AppTheme"
+                  android:usesCleartextTraffic="false" android:allowBackup="true" android:hardwareAccelerated="true">
+                  <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop"
+                      android:showWhenLocked="true" android:turnScreenOn="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <service android:name=".PollService" android:exported="false" android:foregroundServiceType="specialUse">
+                      <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="realtime_messaging"/>
+                  </service>
+              </application>
+          </manifest>
+          FBEOF
+          mkdir -p app/src/main/assets
+          cat > app/src/main/assets/offline.html <<'FBEOF'
+          <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:sans-serif;text-align:center;padding:30vh 20px;background:#f0f2f8}h1{color:#6c4cf1}button{background:#6c4cf1;color:#fff;border:0;border-radius:12px;padding:12px 28px;font-size:16px}</style></head>
+          <body><h1>Friends Book</h1><p>ইন্টারনেট সংযোগ নেই। সংযোগ চেক করে আবার চেষ্টা করুন।</p><button onclick="location.href='https://friendsbook.site.je/'">আবার চেষ্টা করুন</button></body></html>
+          FBEOF
+          mkdir -p app/src/main/java/com/friendsbook/app
+          cat > app/src/main/java/com/friendsbook/app/MainActivity.java <<'FBEOF'
+          package com.friendsbook.app;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.graphics.Color;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.view.View;
+          import android.webkit.CookieManager;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.PermissionRequest;
+          import android.webkit.ValueCallback;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceError;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceResponse;
+          import androidx.webkit.WebViewAssetLoader;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.FrameLayout;
+          import java.util.ArrayList;
+          import java.util.List;
+
+          public class MainActivity extends Activity {
+              // আপনার ওয়েবসাইটের ঠিকানা বদলাতে হলে শুধু এই দুই লাইন বদলান (HTTPS হতে হবে)
+              static final String HOME = "https://appassets.androidplatform.net/assets/www/index.html";
+              static final String HOST = "appassets.androidplatform.net";
+
+              static boolean visible;
+              Intent pendingChooser;
+              WebView web;
+              WebViewAssetLoader loader;
+              FrameLayout root;
+              ValueCallback<Uri[]> fileCb;
+              PermissionRequest pendingReq;
+              View customView;
+              WebChromeClient.CustomViewCallback customCb;
+
+              @Override
+              protected void onCreate(Bundle saved) {
+                  super.onCreate(saved);
+                  if (Build.VERSION.SDK_INT >= 21) getWindow().setStatusBarColor(Color.parseColor("#6c4cf1"));
+                  root = new FrameLayout(this);
+                  web = new WebView(this);
+          web.setBackgroundColor(Color.parseColor("#6c4cf1"));
+                  root.addView(web, new FrameLayout.LayoutParams(-1, -1));
+                  setContentView(root);
+
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  s.setUserAgentString(s.getUserAgentString() + " FriendsBookApp/1.0");
+                  CookieManager.getInstance().setAcceptCookie(true);
+
+                  web.setDownloadListener((url, ua, cd, mime, len) -> {
+                      try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); } catch (Exception e) { }
+                  });
+
+                  loader = new WebViewAssetLoader.Builder().addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this)).build();
+                  web.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
+                          return loader.shouldInterceptRequest(r.getUrl());
+                      }
+                      @Override
+                      public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
+                          Uri u = r.getUrl();
+                          String sc = u.getScheme();
+                          if (HOST.equals(u.getHost()) || "file".equals(sc)) return false;
+                          try { startActivity(new Intent(Intent.ACTION_VIEW, u)); } catch (Exception e) { }
+                          return true;
+                      }
+                      @Override
+                      public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
+                          if (r.isForMainFrame()) v.loadUrl("file:///android_asset/offline.html");
+                      }
+                  });
+
+                  web.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public void onPermissionRequest(final PermissionRequest req) {
+                          runOnUiThread(new Runnable() { public void run() { handlePerm(req); } });
+                      }
+                      @Override
+                      public boolean onShowFileChooser(WebView w, ValueCallback<Uri[]> cb, FileChooserParams p) {
+                          if (fileCb != null) fileCb.onReceiveValue(null);
+                          fileCb = cb;
+                          try {
+                              Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+                              i.addCategory(Intent.CATEGORY_OPENABLE);
+                              List<String> types = new ArrayList<>();
+                              String[] at = p.getAcceptTypes();
+                              if (at != null) for (String a : at) for (String x : a.split(",")) { x = x.trim(); if (x.contains("/")) types.add(x); }
+                              if (types.size() == 1) i.setType(types.get(0)); else i.setType("*/*");
+                              if (types.size() > 1) i.putExtra(Intent.EXTRA_MIME_TYPES, types.toArray(new String[0]));
+                              if (p.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE) i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+                              launchChooser(Intent.createChooser(i, "Choose file"));
+                          }
+                          catch (Exception e) { fileCb = null; return false; }
+                          return true;
+                      }
+                      @Override
+                      public void onShowCustomView(View v, CustomViewCallback cb) {
+                          if (customView != null) { cb.onCustomViewHidden(); return; }
+                          customView = v; customCb = cb;
+                          web.setVisibility(View.GONE);
+                          root.addView(v);
+                      }
+                      @Override
+                      public void onHideCustomView() {
+                          if (customView == null) return;
+                          root.removeView(customView);
+                          customView = null;
+                          web.setVisibility(View.VISIBLE);
+                          if (customCb != null) customCb.onCustomViewHidden();
+                      }
+                  });
+
+                  web.addJavascriptInterface(new Object() {
+                      @JavascriptInterface
+                      public void setSession(String j) {
+                          getSharedPreferences("fb", 0).edit().putString("session", j == null ? "" : j).apply();
+                          startOrStop(j != null && !j.isEmpty());
+                      }
+                  }, "FBAndroid");
+                  if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED)
+                      requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 101);
+                  if (!getSharedPreferences("fb", 0).getString("session", "").isEmpty()) startOrStop(true);
+                  String h = getIntent().getStringExtra("hash");
+                  if (saved != null) web.restoreState(saved); else web.loadUrl(HOME + (h == null ? "" : h));
+              }
+
+              void startOrStop(boolean on) {
+                  Intent s = new Intent(this, PollService.class);
+                  try {
+                      if (!on) stopService(s);
+                      else if (Build.VERSION.SDK_INT >= 26) startForegroundService(s);
+                      else startService(s);
+                  } catch (Exception e) { }
+              }
+
+              @Override
+              protected void onNewIntent(Intent i) {
+                  super.onNewIntent(i);
+                  String h = i.getStringExtra("hash");
+                  if (h != null) web.evaluateJavascript("location.hash='';location.hash='" + h + "'", null);
+              }
+
+              String[] mediaPerms() {
+                  if (Build.VERSION.SDK_INT >= 33) return new String[]{"android.permission.READ_MEDIA_IMAGES", "android.permission.READ_MEDIA_VIDEO", "android.permission.READ_MEDIA_AUDIO"};
+                  return new String[]{"android.permission.READ_EXTERNAL_STORAGE"};
+              }
+
+              void launchChooser(Intent c) {
+                  if (pendingChooser != null) { pendingChooser = c; return; }
+                  if (Build.VERSION.SDK_INT >= 23) {
+                      List<String> miss = new ArrayList<>();
+                      for (String p : mediaPerms()) if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) miss.add(p);
+                      if (!miss.isEmpty() && !getSharedPreferences("fb", 0).getBoolean("asked_media", false)) {
+                          getSharedPreferences("fb", 0).edit().putBoolean("asked_media", true).apply();
+                          pendingChooser = c;
+                          requestPermissions(miss.toArray(new String[0]), 102);
+                          return;
+                      }
+                  }
+                  startActivityForResult(c, 200);
+              }
+
+              void handlePerm(PermissionRequest req) {
+                  List<String> missing = new ArrayList<>();
+                  if (Build.VERSION.SDK_INT >= 23) {
+                      for (String r : req.getResources()) {
+                          String p = null;
+                          if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(r)) p = Manifest.permission.CAMERA;
+                          if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(r)) p = Manifest.permission.RECORD_AUDIO;
+                          if (p != null && checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) missing.add(p);
+                      }
+                  }
+                  if (missing.isEmpty()) { req.grant(req.getResources()); }
+                  else { pendingReq = req; requestPermissions(missing.toArray(new String[0]), 100); }
+              }
+
+              @Override
+              public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
+                  if (code == 102 && pendingChooser != null) {
+                      Intent c = pendingChooser;
+                      pendingChooser = null;
+                      try { startActivityForResult(c, 200); }
+                      catch (Exception e) { if (fileCb != null) { fileCb.onReceiveValue(null); fileCb = null; } }
+                      return;
+                  }
+                  if (code == 100 && pendingReq != null) {
+                      boolean ok = res.length > 0;
+                      for (int x : res) if (x != PackageManager.PERMISSION_GRANTED) ok = false;
+                      if (ok) pendingReq.grant(pendingReq.getResources()); else pendingReq.deny();
+                      pendingReq = null;
+                  }
+              }
+
+              @Override
+              protected void onActivityResult(int req, int res, Intent data) {
+                  if (req == 200 && fileCb != null) {
+                      Uri[] got = WebChromeClient.FileChooserParams.parseResult(res, data);
+                  android.widget.Toast.makeText(this, got == null ? "ফাইল বাছাই হয়নি" : (got.length + " টি ফাইল বাছাই হয়েছে"), android.widget.Toast.LENGTH_SHORT).show();
+                  fileCb.onReceiveValue(got);
+                      fileCb = null;
+                  } else super.onActivityResult(req, res, data);
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (customView != null) { web.getWebChromeClient().onHideCustomView(); }
+                  else if (web.canGoBack()) web.goBack();
+                  else super.onBackPressed();
+              }
+
+              @Override protected void onSaveInstanceState(Bundle out) { super.onSaveInstanceState(out); web.saveState(out); }
+              @Override protected void onPause() { visible = false; super.onPause(); }
+              @Override protected void onResume() { super.onResume(); visible = true; web.onResume(); }
+              @Override protected void onDestroy() { web.destroy(); super.onDestroy(); }
+          }
+          FBEOF
+          mkdir -p app/src/main/java/com/friendsbook/app
+          cat > app/src/main/java/com/friendsbook/app/PollService.java <<'FBEOF'
+          package com.friendsbook.app;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.media.AudioAttributes;
+          import android.media.RingtoneManager;
+          import android.os.Build;
+          import android.os.IBinder;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+          import java.io.BufferedReader;
+          import java.io.InputStreamReader;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.text.SimpleDateFormat;
+          import java.util.Date;
+          import java.util.TimeZone;
+
+          public class PollService extends Service {
+              Thread th;
+              volatile boolean run;
+
+              @Override public IBinder onBind(Intent i) { return null; }
+
+              @Override
+              public int onStartCommand(Intent in, int flags, int id) {
+                  mk();
+                  Notification n = nb("fb_sync").setSmallIcon(android.R.drawable.stat_notify_sync)
+                      .setContentTitle("Friends Book").setContentText("নতুন বার্তা ও কলের জন্য চালু আছে").setOngoing(true).build();
+                  if (Build.VERSION.SDK_INT >= 34) startForeground(1, n, 0x40000000); else startForeground(1, n);
+                  if (th == null || !th.isAlive()) {
+                      run = true;
+                      th = new Thread(new Runnable() {
+                          public void run() {
+                              int k = 0;
+                              while (run) {
+                                  try {
+                                      JSONObject c = cfg();
+                                      if (c != null) { checkCalls(c); if (k % 3 == 0) checkNotifs(c); }
+                                  } catch (Exception e) { }
+                                  k++;
+                                  try { Thread.sleep(5000); } catch (Exception e) { }
+                              }
+                          }
+                      });
+                      th.start();
+                  }
+                  return START_STICKY;
+              }
+
+              @Override public void onDestroy() { run = false; super.onDestroy(); }
+
+              SharedPreferences sp() { return getSharedPreferences("fb", 0); }
+
+              JSONObject cfg() {
+                  try { String s = sp().getString("session", ""); return s.isEmpty() ? null : new JSONObject(s); }
+                  catch (Exception e) { return null; }
+              }
+
+              Notification.Builder nb(String ch) {
+                  return Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(this, ch) : new Notification.Builder(this);
+              }
+
+              void mk() {
+                  if (Build.VERSION.SDK_INT < 26) return;
+                  NotificationManager m = getSystemService(NotificationManager.class);
+                  m.createNotificationChannel(new NotificationChannel("fb_sync", "Background", NotificationManager.IMPORTANCE_MIN));
+                  m.createNotificationChannel(new NotificationChannel("fb_msg", "Messages & Activity", NotificationManager.IMPORTANCE_HIGH));
+                  NotificationChannel c = new NotificationChannel("fb_call", "Incoming calls", NotificationManager.IMPORTANCE_HIGH);
+                  c.setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE),
+                      new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE).build());
+                  c.enableVibration(true);
+                  m.createNotificationChannel(c);
+              }
+
+              JSONArray get(JSONObject c, String path) throws Exception {
+                  HttpURLConnection h = (HttpURLConnection) new URL(c.getString("url") + "/rest/v1/" + path).openConnection();
+                  h.setConnectTimeout(8000); h.setReadTimeout(8000);
+                  h.setRequestProperty("apikey", c.getString("key"));
+                  h.setRequestProperty("Authorization", "Bearer " + c.getString("token"));
+                  if (h.getResponseCode() != 200) return new JSONArray();
+                  BufferedReader r = new BufferedReader(new InputStreamReader(h.getInputStream(), "UTF-8"));
+                  StringBuilder b = new StringBuilder(); String l;
+                  while ((l = r.readLine()) != null) b.append(l);
+                  r.close();
+                  return new JSONArray(b.toString());
+              }
+
+              boolean seen(String id) { return sp().getString("seen", "").contains(id); }
+              void mark(String id) {
+                  String s = sp().getString("seen", "") + "," + id;
+                  if (s.length() > 4000) s = s.substring(s.length() - 3000);
+                  sp().edit().putString("seen", s).apply();
+              }
+
+              String nameOf(JSONObject o) {
+                  JSONObject p = o.optJSONObject("profiles");
+                  if (p == null) return "কেউ";
+                  if (!p.isNull("full_name") && !p.optString("full_name").isEmpty()) return p.optString("full_name");
+                  return p.optString("username");
+              }
+
+              void checkNotifs(JSONObject c) throws Exception {
+                  boolean first = !sp().contains("seen");
+                  JSONArray a = get(c, "notifications?user_id=eq." + c.getString("uid") + "&read=eq.false&order=created_at.desc&limit=10&select=id,type,profiles:actor_id(username,full_name)");
+                  for (int i = a.length() - 1; i >= 0; i--) {
+                      JSONObject o = a.getJSONObject(i);
+                      String id = o.getString("id");
+                      if (seen(id)) continue;
+                      mark(id);
+                      if (first || MainActivity.visible) continue;
+                      String t = o.getString("type"), nm = nameOf(o), msg;
+                      if (t.equals("like")) msg = nm + " আপনার Post-এ React করেছেন";
+                      else if (t.equals("comment")) msg = nm + " আপনার Post-এ Comment করেছেন";
+                      else if (t.equals("follow")) msg = nm + " আপনাকে Follow করেছেন";
+                      else if (t.equals("message")) msg = nm + " আপনাকে নতুন Message পাঠিয়েছেন";
+                      else msg = "নতুন Notification";
+                      show(id.hashCode(), "fb_msg", t.equals("message") ? "নতুন Message" : "Friends Book", msg, t.equals("message") ? "#/messages" : "#/notifications", false);
+                  }
+                  if (first && !sp().contains("seen")) sp().edit().putString("seen", " ").apply();
+              }
+
+              void checkCalls(JSONObject c) throws Exception {
+                  SimpleDateFormat f = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'");
+                  f.setTimeZone(TimeZone.getTimeZone("UTC"));
+                  String since = f.format(new Date(System.currentTimeMillis() - 40000));
+                  JSONArray a = get(c, "calls?callee_id=eq." + c.getString("uid") + "&status=eq.ringing&created_at=gte." + since + "&select=id,type,profiles:caller_id(username,full_name)");
+                  for (int i = 0; i < a.length(); i++) {
+                      JSONObject o = a.getJSONObject(i);
+                      String id = o.getString("id");
+                      if (seen(id)) continue;
+                      mark(id);
+                      if (MainActivity.visible) continue;
+                      show(id.hashCode(), "fb_call", "Incoming " + o.optString("type") + " call", nameOf(o) + " কল করছেন", "#/ring", true);
+                  }
+              }
+
+              void show(int nid, String ch, String title, String text, String hash, boolean call) {
+                  int fl = PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0);
+                  PendingIntent pi = PendingIntent.getActivity(this, nid, open(hash), fl);
+                  Notification.Builder b = nb(ch).setSmallIcon(android.R.drawable.stat_notify_chat)
+                      .setContentTitle(title).setContentText(text).setContentIntent(pi).setAutoCancel(true);
+                  if (call) {
+                      PendingIntent acc = PendingIntent.getActivity(this, nid + 1, open("#/acceptcall"), fl);
+                      b.setCategory(Notification.CATEGORY_CALL).setPriority(Notification.PRIORITY_MAX).setFullScreenIntent(pi, true)
+                          .addAction(android.R.drawable.ic_menu_call, "Accept", acc);
+                      if (Build.VERSION.SDK_INT >= 26) b.setTimeoutAfter(40000);
+                      else b.setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)).setVibrate(new long[]{0, 500, 300, 500});
+                  } else {
+                      b.setPriority(Notification.PRIORITY_HIGH).setDefaults(Notification.DEFAULT_ALL);
+                  }
+                  ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).notify(nid, b.build());
+              }
+
+              Intent open(String hash) {
+                  return new Intent(this, MainActivity.class).putExtra("hash", hash)
+                      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+              }
+          }
+          FBEOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_launcher.xml <<'FBEOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#6c4cf1" android:pathData="M0,0h108v108h-108z"/>
+              <path android:fillColor="#FFFFFF" android:pathData="M36,28h40v12h-27v13h23v12h-23v25h-13z"/>
+          </vector>
+          FBEOF
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/strings.xml <<'FBEOF'
+          <resources><string name="app_name">Friends Book Admin</string></resources>
+          FBEOF
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/styles.xml <<'FBEOF'
+          <resources>
+              <style name="AppTheme" parent="android:Theme.DeviceDefault.Light.NoActionBar">
+                  <item name="android:windowBackground">#6c4cf1</item>
+                  <item name="android:statusBarColor">#6c4cf1</item>
+              </style>
+          </resources>
+          FBEOF
+          mkdir -p .
+          cat > build.gradle <<'FBEOF'
+          plugins { id 'com.android.application' version '8.2.2' apply false }
+          FBEOF
+          mkdir -p .
+          cat > gradle.properties <<'FBEOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.nonTransitiveRClass=true
+          android.useAndroidX=true
+          FBEOF
+          mkdir -p .
+          cat > settings.gradle <<'FBEOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
+          rootProject.name = "FriendsBook"
+          include ':app'
+          FBEOF
+      - name: Add web app files
+        run: |
+          ZIP=$(ls *.zip | head -n1)
+          echo "Using $ZIP"
+          mkdir -p proj/app/src/main/assets/www
+          unzip -q "$ZIP" -d proj/app/src/main/assets/www
+          curl -L --fail -o proj/app/src/main/assets/www/supabase.js https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.0/dist/umd/supabase.js
+          ls -la proj/app/src/main/assets/www
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: 8.2
+      - name: Build debug APK
+        working-directory: proj
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FriendsBookAdmin-App
+          path: proj/app/build/outputs/apk/debug/*.apk
